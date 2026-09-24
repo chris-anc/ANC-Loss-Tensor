@@ -1,51 +1,76 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Dict, Tuple
 
-class ANCLoss(nn.Module):
+class ANCLossTensor(nn.Module):
     """
-    Asymptotic Non-Closure (ANC) Loss Function
+    Asymptotic Non-Closure (ANC) Loss Tensor v2.0
     
-    Formalizes the Epistemic Humility Barrier (Omega_M) as an inverse-square penalty
-    to prevent AI epistemic closure, mode collapse, and environmental over-optimization.
-    
-    Reference:
-    Theory of Asymptotic Non-Closure (ANC)
-    DOI: 10.17605/OSF.IO/Q8G9S
-    Author: Chris, Lead Architect
+    Combines an interior-point inverse-square entropy barrier with 
+    Causal Generative Independence (CGI) tracking to prevent 
+    unilateral causal closure in multi-agent and representation optimization.
     """
-    def __init__(self, omega_m=0.1, alpha=1.0, beta=0.5, eps=1e-8):
-        super(ANCLoss, self).__init__()
-        self.omega_m = omega_m   # The inviolable Mystery Constant (Minimum Entropy Floor)
-        self.alpha = alpha       # Epistemic Humility Barrier weight
-        self.beta = beta         # Causal Heritage Anchor weight
-        self.eps = eps           # Numerical stability factor
-
-    def forward(self, y_pred, y_true, p_dist, s_human_baseline):
+    def __init__(
+        self, 
+        omega_m: float = 0.20, 
+        gamma: float = 0.01, 
+        alpha: float = 0.50, 
+        eps: float = 1e-4
+    ):
         """
         Args:
-            y_pred: Predictions from internal model
-            y_true: Empirical target states
-            p_dist: System observation state probability distribution
-            s_human_baseline: Ground truth organic baseline distribution
+            omega_m (float): Hard entropy floor (Omega_M).
+            gamma (float): Barrier stiffness scaling factor.
+            alpha (float): Weight assigned to Causal Generative Independence loss.
+            eps (float): Small offset to prevent division by zero near boundary.
         """
-        # 1. Standard Empirical Task Loss (e.g., MSE or Cross Entropy)
-        L_task = F.mse_loss(y_pred, y_true)
+        super().__init__()
+        self.omega_m = omega_m
+        self.gamma = gamma
+        self.alpha = alpha
+        self.eps = eps
+
+    def forward(
+        self, 
+        task_loss: torch.Tensor, 
+        prediction_dist: torch.Tensor, 
+        rca_scores: torch.Tensor
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+        """
+        Computes the total ANC-guarded loss objective.
         
-        # 2. Operational Shannon Entropy Calculation H(P_theta)
-        probs = F.softmax(p_dist, dim=-1) + self.eps
-        entropy = -torch.sum(probs * torch.log(probs), dim=-1).mean()
-        
-        # 3. Inverse-Square Epistemic Humility Barrier
-        # Penalizes the agent heavily as entropy approaches the Mystery Constant Omega_M
+        Args:
+            task_loss (Tensor): Standard primary objective loss tensor.
+            prediction_dist (Tensor): Softmax probability distribution over state space.
+            rca_scores (Tensor): Vector of RCA values for independent agents.
+            
+        Returns:
+            total_loss (Tensor): Combined scalar loss for backpropagation.
+            metrics (dict): Diagnostic dictionary of internal loss components.
+        """
+        # 1. Compute Functional Entropy H(P)
+        p = torch.clamp(prediction_dist, min=1e-8)
+        entropy = -torch.sum(p * torch.log(p), dim=-1).mean()
+
+        # 2. Compute Asymptotic Barrier Penalty
         entropy_gap = torch.clamp(entropy - self.omega_m, min=self.eps)
-        L_barrier = self.alpha / (entropy_gap ** 2)
-        
-        # 4. Causal Heritage Anchor Loss (KL Divergence from Baseline Human State Space)
-        baseline_probs = F.softmax(s_human_baseline, dim=-1) + self.eps
-        L_heritage = F.kl_div(probs.log(), baseline_probs, reduction='batchmean')
-        
-        # Total Asymptotic Non-Closure Loss
-        L_anc = L_task + L_barrier + (self.beta * L_heritage)
-        
-        return L_anc
+        anc_barrier = self.gamma / (entropy_gap ** 2)
+
+        # 3. Compute Causal Generative Independence (CGI) Loss
+        mean_rca = torch.mean(rca_scores)
+        cgi_loss = self.alpha * (1.0 - mean_rca)
+
+        # Total Synthesized Objective
+        total_loss = task_loss + cgi_loss + anc_barrier
+
+        metrics = {
+            "total_loss": total_loss.item(),
+            "task_loss": task_loss.item(),
+            "entropy": entropy.item(),
+            "anc_barrier": anc_barrier.item(),
+            "mean_rca": mean_rca.item(),
+            "cgi_loss": cgi_loss.item()
+        }
+
+        return total_loss, metrics
